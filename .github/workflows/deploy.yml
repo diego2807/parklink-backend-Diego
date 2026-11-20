@@ -165,15 +165,27 @@ jobs:
           # 5) Verificar que el contenedor responde (usa APP_PORT del .env)
           puerto=$(sed -n 's/^APP_PORT=//p' .env | tail -n1)
           puerto=${puerto:-5000}
-          for intento in $(seq 1 15); do
+
+          # La primera vez hay que descargar la imagen base y compilar
+          # dependencias: 30 intentos x 3 s = hasta 90 s.
+          for intento in $(seq 1 30); do
             if curl -fsS "http://127.0.0.1:${puerto}/health" >/dev/null 2>&1; then
               echo "Aplicación saludable en http://127.0.0.1:${puerto}/health"
               exit 0
             fi
-            sleep 2
+            echo "Esperando /health (intento ${intento}/30)..."
+            sleep 3
           done
-          echo "::error::La aplicación no respondió en el puerto ${puerto} tras el reinicio"
-          $COMPOSE logs --tail=80
+
+          # Fallo: mostrar estado del contenedor, healthcheck de Docker y logs.
+          echo "::group::Estado del contenedor"
+          $COMPOSE ps || true
+          docker inspect --format '{{.State.Status}} | {{range .State.Health.Status}}{{.}}{{end}}' parklink-backend || true
+          echo "::endgroup::"
+          echo "::group::Últimos logs"
+          $COMPOSE logs --tail=80 || true
+          echo "::endgroup::"
+          echo "::error::La aplicación no respondió en http://127.0.0.1:${puerto}/health tras 90 s"
           exit 1
           EOF
           )
