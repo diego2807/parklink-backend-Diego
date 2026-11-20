@@ -3,9 +3,10 @@ name: Despliegue a AWS EC2
 # Rama principal del repositorio: main (origin/HEAD -> origin/main).
 #   - push a "main"  -> Environment "staging"
 #   - tag "v*"       -> Environment "production"
-# Al publicar un tag, GitHub también dispara el evento de push a main; ese
-# caso se omite para no desplegar staging a la vez.
-# También se puede lanzar a mano desde la rama main.
+#   - workflow_dispatch -> el entorno elegido en inputs.environment
+#
+# Al publicar un tag, GitHub también dispara el evento de push a "main"; el
+# job de staging se omite en ese caso para desplegar solo producción.
 on:
   push:
     branches: [main]
@@ -21,9 +22,18 @@ on:
           - staging
           - production
 
+# ── Entorno resuelto una sola vez para todo el workflow ────────────────────
+# github.event.inputs.environment SOLO existe en workflow_dispatch y llega como
+# texto; en push vale '' (vacío). Ojo: NO usar el identificador `environment`
+# dentro de las expresiones del cuerpo del workflow: no es un contexto válido
+# fuera de jobs.<id>.environment y se renderiza como cadena vacía.
+# Regla: manual -> input | tag -> production | resto (push a main) -> staging.
+env:
+  DEPLOY_ENV: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || (github.ref_type == 'tag' && 'production' || 'staging') }}
+
 concurrency:
   # Un despliegue a la vez por entorno (no cancela el que está en curso).
-  group: deploy-${{ github.event.inputs.environment || (github.ref_type == 'tag' && 'production' || 'staging') }}
+  group: deploy-${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || (github.ref_type == 'tag' && 'production' || 'staging') }}
   cancel-in-progress: false
 
 permissions:
@@ -31,26 +41,34 @@ permissions:
 
 jobs:
   deploy:
-    name: Desplegar en ${{ github.event.inputs.environment || (github.ref_type == 'tag' && 'production' || 'staging') }}
+    name: Desplegar en ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || (github.ref_type == 'tag' && 'production' || 'staging') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
-    # Solo desde la rama principal (push manual a staging/production).
-    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    # Solo desde la rama principal (lanzamiento manual a staging/production).
+    # Se escribe con ${{ }} para que se evalúe como expresión booleana y no
+    # como texto ambiguo de YAML.
+    if: ${{ github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
 
     # Usa los GitHub Environments "staging" o "production" con sus 8 secrets.
-    environment: ${{ github.event.inputs.environment || (github.ref_type == 'tag' && 'production' || 'staging') }}
+    environment: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.environment || (github.ref_type == 'tag' && 'production' || 'staging') }}
 
     steps:
       - name: Descargar el código
         uses: actions/checkout@v4
 
       - name: Conectar por SSH y desplegar
-        # En un push de tag solo se despliega producción (ver comentario de "on").
-        if: ${{ !(github.ref_type == 'tag' && github.event.inputs.environment == '') }}
+        # En un push de tag solo se despliega producción: el evento de push a
+        # "main" que GitHub dispara junto al tag se salta.
+        #   push de tag      -> ref_type=tag  e input=''  -> NO se salta  ✅
+        #   push a main      -> ref_type=branch,input=''  -> sigue
+        #   manual en main   -> input no vacío            -> sigue
+        if: ${{ !(github.ref_type == 'tag' && github.event_name == 'push') }}
         # Bash: así un comando con error detiene el despliegue (set -euo pipefail).
         shell: bash
         env:
+          # Entorno resuelto, disponible como $DEPLOY_ENV dentro del script.
+          DEPLOY_ENV: ${{ env.DEPLOY_ENV }}
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USER: ${{ secrets.EC2_USER }}
           EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
@@ -62,10 +80,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          # ── Validar que los 8 secrets estén configurados ──
+          # ── Validar que el entorno y los 8 secrets estén configurados ──
+          case "${DEPLOY_ENV:-}" in
+            staging|production) ;;
+            *)
+              echo "::error::Entorno no válido: '${DEPLOY_ENV:-}' (se esperaba staging o production)."
+              exit 1
+              ;;
+          esac
+          echo "Entorno de despliegue: $DEPLOY_ENV"
+
           for nombre in EC2_HOST EC2_USER EC2_SSH_KEY APP_PORT DATABASE_URL SECRET_KEY JWT_SECRET_KEY DEPLOY_PATH; do
             if [ -z "${!nombre:-}" ]; then
-              echo "::error::Falta el secret $nombre en el entorno '${{ environment }}'."
+              echo "::error::Falta el secret $nombre en el entorno '$DEPLOY_ENV'."
               exit 1
             fi
           done
@@ -167,7 +194,7 @@ jobs:
         run: |
           echo "### Despliegue a AWS EC2" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Entorno: \`${{ environment }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Entorno: \`${DEPLOY_ENV:-desconocido}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Resultado: \`${{ job.status }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Commit: \`${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Ref: \`${{ github.ref_name }}\`" >> "$GITHUB_STEP_SUMMARY"
