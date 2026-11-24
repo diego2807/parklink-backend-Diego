@@ -22,7 +22,7 @@ marshmallow==4.3.0
 marshmallow-sqlalchemy==1.5.0
 mysqlclient==2.2.8
 PyJWT==2.13.0
-PyMySQL==1.2.0
+PyMySQL>=1.1,<2
 python-dotenv==1.2.2
 python-engineio==4.14.0
 python-socketio==5.17.0
@@ -35,3 +35,5 @@ reportlab==5.1.0
 pytest==9.1.1
 zope.event==6.1
 zope.interface==8.0.1
+cryptography==50.0.2
+gunicorn==23.0.0
